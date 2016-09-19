@@ -1,0 +1,5 @@
+name = Repeat Filter
+description = Repeat one or more tags in a text
+core = 7.x
+
+dependencies[] = parse_yaml

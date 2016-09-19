@@ -1,0 +1,229 @@
+<?php
+/**
+ * @file
+ * Describes the Repeat filter.
+ */
+
+/**
+ * Implements hook_filter_info().
+ */
+function repeat_filter_filter_info() {
+  $filters = array();
+  $filters['repeat_filter'] = array(
+    'title' => t('Repeat filter'),
+    'description' => t('Repeats selected tags multiple times.'),
+    'process callback' => '_repeat_filter_process',
+    'settings callback' => '_repeat_filter_settings',
+    'default settings' => array(
+      'config' => FALSE,
+    ),
+  );
+  return $filters;
+}
+
+/**
+ * Settings callback for the repeat_filter filter.
+ *
+ * @see hook_filter_info()
+ * @see hook_filter_FILTER_settings()
+ */
+function _repeat_filter_settings($form, &$form_state, $filter, $format, $defaults) {
+  $filter->settings += $defaults;
+
+  $elements = array();
+  $elements['config'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Describe the repeat filter configuration in yaml form.'),
+    '#default_value' => $filter->settings['config'],
+    '#element_validate' => array('_repeat_filter_validate_config'),
+  );
+
+  return $elements;
+}
+
+/**
+ * Implements hook_filter_FILTER_process().
+ *
+ * Convert the text to DomDocument, then pass it through the filter settings.
+ */
+function _repeat_filter_process($text, $format) {
+  if ($config = parse_yaml_stream($format->settings['config'])) {
+    $dom = new DomDocument();
+    $dom->loadHTML(mb_convert_encoding($text, 'HTML-ENTITIES', 'UTF-8'));
+    $xpath = new DOMXpath($dom);
+    // Parse all root elements of the config.
+    foreach ($config as $key => $conf) {
+      _repeat_filter_callback($dom, $xpath, $conf);
+    }
+    $text = $dom->saveHTML($dom);
+  }
+
+  return $text;
+}
+
+/**
+ * Manipulate the DOM based on the configuration
+ */
+function _repeat_filter_callback(&$dom, $xpath, $conf) {
+  // A little excessive we create a unique class to mark our clones.
+  $temp_class = 'repeat-filter-' . time();
+
+  $elements_nodelist = $dom->getElementsByTagName($conf['tag']);
+  $elements = array();
+  foreach ($elements_nodelist as $element) {
+    array_push($elements, $element);
+  }
+  $repeat = isset($conf['repeat']) ? $conf['repeat'] : 1;
+
+  foreach ($elements as $element) {
+    // Create a clone and append it to the DOM.
+    for ($x = 0; $x < $repeat; $x++) {
+      $clone = $element->cloneNode(TRUE);
+      $class = $element->getAttribute('class');
+      $class .= $temp_class;
+      $clone->setAttribute('class', $class);
+      $element->parentNode->insertBefore($clone, $element);
+    }
+  }
+
+  // Sort the clones and originals in two arrays.
+  $originals = array();
+  $clones = array();
+  // The elements_nodelist now also contains the clones,
+  // so we can use it to sort our clones and originals.
+  foreach ($elements_nodelist as $element) {
+    if (!preg_match('/^.*' . $temp_class . '.*$/', $element->getAttribute('class'))) {
+      array_push($originals, $element);
+    }
+    else {
+      array_push($clones, $element);
+    }
+  }
+
+  // Exclude elements from the clones.
+  if (isset($conf['clone']['exclude'])) {
+    _repeat_filter_exclude($clones, $xpath, $conf['clone']['exclude']);
+  }
+
+  // Exclude elements from the original.
+  if (isset($conf['original']['exclude'])) {
+    _repeat_filter_exclude($originals, $xpath, $conf['original']['exclude']);
+  }
+
+  // Add class to clones.
+  if (isset($conf['clone']['attributes']['class'])) {
+    _repeat_filter_add_class($clones, $conf['clone']['attributes']['class']);
+  }
+
+  // Add class to originals.
+  if (isset($conf['original']['attributes']['class'])) {
+    _repeat_filter_add_class($clones, $conf['original']['attributes']['class']);
+  }
+}
+
+/**
+ * Add classes to element.
+ */
+function _repeat_filter_add_class($elements, $classes) {
+  foreach ($elements as $element) {
+    $class = $element->getAttribute('class');
+    foreach ($classes as $c) {
+      if (!preg_match('/^.*' . $c . '.*$/', $class)) {
+        $class .= ' ' . $c;
+      }
+    }
+    $element->setAttribute('class', $class);
+  }
+}
+
+/**
+ * Remove sub-elements from element.
+ */
+function _repeat_filter_exclude($elements, $xpath, $exclude) {
+
+  foreach ($exclude as $exclude_tokens) {
+    // Split the token in tag and class.
+    $exclude_tokens = preg_split('/\./', $exclude_tokens);
+
+    $tag = count($exclude_tokens) > 1 ? array_shift($exclude_tokens) : '*';
+    $query = './/' . $tag;
+
+    foreach ($elements as $element) {
+      // First find every sub-element by tag or wildcard.
+      $remove_elements = $xpath->query($query, $element);
+
+      // Filter the sub-elements on classes.
+      foreach ($exclude_tokens as $ex) {
+        $temp_remove_elements = array();
+        foreach ($remove_elements as $re) {
+          if (preg_match('/' . $ex . '/', $re->getAttribute('class'))) {
+            array_push($temp_remove_elements, $re);
+          }
+        }
+        $remove_elements = $temp_remove_elements;
+      }
+
+      // Finally remove the from the DOM.
+      foreach ($remove_elements as $remove) {
+        $remove->parentNode->removeChild($remove);
+      }
+    }
+  }
+}
+
+/**
+ * Helper form element validator: textarea config.
+ */
+function _repeat_filter_validate_config($element, &$form_state) {
+  $value = $element['#value'];
+  if (!$yaml = parse_yaml_stream($value)) {
+    form_error($element, t('%name is not valid yaml.', array('%name' => $element['#title'])));
+  }
+
+  foreach ($yaml as $key => $conf) {
+
+    // Make sure the config has a tag.
+    if (!isset($conf['tag']) || !is_string($conf['tag'])) {
+      form_error($element, t('In repeat filter config: %name tag must be a string.', array('%name' => $key)));
+    }
+
+    if (isset($conf['original']['exclude'])) {
+      _repeat_filter_validate_generic($element, $conf['original']['exclude']);
+    }
+
+    if (isset($conf['original']['attributes']['class'])) {
+      _repeat_filter_validate_generic($element, $conf['original']['attributes']['class']);
+    }
+
+    if (isset($conf['clone']['exclude'])) {
+      _repeat_filter_validate_generic($element, $conf['clone']['exclude']);
+    }
+
+    if (isset($conf['clone']['attributes']['class'])) {
+      _repeat_filter_validate_generic($element, $conf['clone']['attributes']['class']);
+    }
+
+    // Test the exclude array.
+    if (isset($conf['repeat'])) {
+      if (!is_int($conf['repeat'])) {
+        form_error($element, t('In repeat filter config: %name repeat must be an integer.', array('%name' => $key)));
+      }
+    }
+  }
+}
+
+/**
+ * Validate to an array of strings.
+ */
+function _repeat_filter_validate_generic($element, $token) {
+  if (!is_array($token)) {
+    form_error($element, t('In repeat filter config: %name exclude must be an array.', array('%name' => $token)));
+  }
+  else {
+    foreach ($token as $key => $str) {
+      if (!is_string($str)) {
+        form_error($element, t('In repeat filter config: %name exclude tag must be a string.', array('%name' => $key)));
+      }
+    }
+  }
+}
